@@ -1,0 +1,210 @@
+connectors:
+  signozmeter:
+    metrics_flush_interval: 1h
+    dimensions:
+      - name: service.name
+      - name: deployment.environment
+      - name: host.name
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+  mongodb:
+    hosts:
+      - endpoint: mongo-db-internal:27017
+    collection_interval: 5s
+    initial_delay: 1s
+    tls:
+      insecure: true
+      insecure_skip_verify: true
+    metrics:
+      mongodb.flushes.rate:
+        enabled: false
+
+      # mongodb.lock.acquire.count:
+      #   enabled: true
+      # mongodb.lock.acquire.time:
+      #   enabled: true
+      # mongodb.lock.acquire.wait_count:
+      #   enabled: true
+      # mongodb.lock.deadlock.count:
+      #   enabled: true
+      # mongodb.operation.latency.time:
+      #   enabled: true
+
+
+  filelog/mongodb:
+    include: ["/var/log/mongodb/mongodb.log"]
+    operators:
+      # Parse structured mongodb logs
+      # For more details, see https://www.mongodb.com/docs/manual/reference/log-messages/#structured-logging
+      - type: json_parser
+        if: body matches '^\\s*{\\s*".*}\\s*$'
+        parse_from: body
+        parse_to: attributes
+        timestamp:
+          parse_from: attributes.t.$$date
+          layout: '2006-01-02T15:04:05.000-07:00'
+          layout_type: gotime
+        severity:
+          parse_from: attributes.s
+          overwrite_text: true
+          mapping:
+            debug:
+              - D1
+              - D2
+              - D3
+              - D4
+              - D5
+            info: I
+            warn: W
+            error: E
+            fatal: F
+      - type: flatten
+        if: attributes.attr != nil
+        field: attributes.attr
+      - type: move
+        if: attributes.msg != nil
+        from: attributes.msg
+        to: body
+      - type: move
+        if: attributes.c != nil
+        from: attributes.c
+        to: attributes.component
+      - type: move
+        if: attributes.id != nil
+        from: attributes.id
+        to: attributes.mongo_log_id
+      - type: remove
+        if: attributes.t != nil
+        field: attributes.t
+      - type: remove
+        if: attributes.s != nil
+        field: attributes.s
+      - type: add
+        field: attributes.source
+        value: mongodb
+
+
+processors:
+  batch:
+    send_batch_size: 10000
+    send_batch_max_size: 11000
+    timeout: 10s
+  batch/meter:
+    send_batch_max_size: 25000
+    send_batch_size: 20000
+    timeout: 1s
+  resourcedetection:
+    # Using OTEL_RESOURCE_ATTRIBUTES envvar, env detector adds custom labels.
+    detectors: [env, system]
+    timeout: 2s
+    system:
+      hostname_sources: ["os"]
+  signozspanmetrics/delta:
+    metrics_exporter: signozclickhousemetrics
+    metrics_flush_interval: 60s
+    latency_histogram_buckets: [100us, 1ms, 2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1000ms, 1400ms, 2000ms, 5s, 10s, 20s, 40s, 60s ]
+    dimensions_cache_size: 100000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_DELTA
+    enable_exp_histogram: true
+    dimensions:
+      - name: service.namespace
+        default: default
+      - name: deployment.environment
+        default: default
+      # This is added to ensure the uniqueness of the timeseries
+      # Otherwise, identical timeseries produced by multiple replicas of
+      # collectors result in incorrect APM metrics
+      - name: signoz.collector.id
+      - name: service.version
+      - name: browser.platform
+      - name: browser.mobile
+      - name: k8s.cluster.name
+      - name: k8s.node.name
+      - name: k8s.namespace.name
+      - name: host.name
+      - name: host.type
+      - name: container.name
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+exporters:
+  clickhousetraces:
+    datasource: tcp://clickhouse:9000/signoz_traces
+    low_cardinal_exception_grouping: ${env:LOW_CARDINAL_EXCEPTION_GROUPING}
+    use_new_schema: true
+  signozclickhousemetrics:
+    dsn: tcp://clickhouse:9000/signoz_metrics
+  clickhouselogsexporter:
+    dsn: tcp://clickhouse:9000/signoz_logs
+    timeout: 10s
+    use_new_schema: true
+  signozclickhousemeter:
+    dsn: tcp://clickhouse:9000/signoz_meter
+    timeout: 45s
+    sending_queue:
+      enabled: false
+  metadataexporter:
+    cache:
+      provider: in_memory
+    dsn: tcp://clickhouse:9000/signoz_metadata
+    enabled: true
+    timeout: 45s
+  debug:
+    verbosity: detailed
+  # export to local collector
+  otlp/mongodb:
+    endpoint: "localhost:4317"
+    tls:
+      insecure: true
+  # export to local collector
+  otlp/mongodb-logs:
+    endpoint: "localhost:4317"
+    tls:
+      insecure: true
+
+
+
+service:
+  telemetry:
+    logs:
+      # level: debug
+      encoding: json
+  extensions:
+    - health_check
+    - pprof
+  pipelines:
+
+    metrics/mongodb:
+      receivers: [mongodb]
+      processors: [resourcedetection, batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+    logs/mongodb:
+      receivers: [filelog/mongodb]
+      processors: [batch]
+      exporters: [clickhouselogsexporter]
+    traces:
+      receivers: [otlp]
+      processors: [signozspanmetrics/delta, batch]
+      exporters: [clickhousetraces, metadataexporter, signozmeter]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [clickhouselogsexporter, metadataexporter, signozmeter]
+    metrics/meter:
+      receivers: [signozmeter]
+      processors: [batch/meter]
+      exporters: [signozclickhousemeter]
