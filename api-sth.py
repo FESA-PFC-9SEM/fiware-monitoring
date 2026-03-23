@@ -7,15 +7,15 @@ from datetime import datetime
 import pytz
  
 # Constants for IP and port
-IP_ADDRESS = "46.17.108.113"
+IP_ADDRESS = "localhost"
 PORT_STH = 8666
 DASH_HOST = "0.0.0.0"  # Set this to "0.0.0.0" to allow access from any IP
  
 # Function to get luminosity data from the API
 def get_luminosity_data(lastN):
-    url = f"http://{IP_ADDRESS}:{PORT_STH}/STH/v1/contextEntities/type/Lamp/id/urn:ngsi-ld:Lamp:001/attributes/luminosity?lastN={lastN}"
+    url = f"http://{IP_ADDRESS}:{PORT_STH}/STH/v1/contextEntities/type/RainSensor/id/urn:ngsi-ld:RainSensor:0003/attributes/intensity?lastN={lastN}"
     headers = {
-        'fiware-service': 'smart',
+        'fiware-service': 'rainmonitoring',
         'fiware-servicepath': '/'
     }
     response = requests.get(url, headers=headers)
@@ -129,4 +129,4 @@ def update_graph(stored_data):
     return {}
  
 if __name__ == '__main__':
-    app.run_server(debug=True, host=DASH_HOST, port=8050)
+    app.run(debug=True, host=DASH_HOST, port=8050)

@@ -13,6 +13,35 @@ receivers:
         endpoint: 0.0.0.0:4318
       grpc:
         endpoint: 0.0.0.0:4317
+
+  hostmetrics:
+    root_path: /hostfs  # Required: points to the host filesystem mounted inside the container
+    collection_interval: 10s
+    scrapers:
+      cpu: {}
+      disk: {}
+      load: {}
+      filesystem: {}
+      memory: {}
+      network: {}
+      paging: {}
+      process:
+        mute_process_name_error: true
+        mute_process_exe_error: true
+        mute_process_io_error: true
+        mute_process_user_error: true
+      processes: {}
+      system: {}
+
+  prometheus/nvidia:
+    config:
+      scrape_configs:
+        - job_name: "dcgm-exporter"
+          scrape_interval: 15s
+          scrape_timeout: 10s
+          static_configs:
+            - targets: ["dcgm-exporter:9400"]
+      
   mongodb:
     hosts:
       - endpoint: mongo-db-internal:27017
@@ -24,7 +53,6 @@ receivers:
     metrics:
       mongodb.flushes.rate:
         enabled: false
-
       # mongodb.lock.acquire.count:
       #   enabled: true
       # mongodb.lock.acquire.time:
@@ -35,7 +63,6 @@ receivers:
       #   enabled: true
       # mongodb.operation.latency.time:
       #   enabled: true
-
 
   filelog/mongodb:
     include: ["/var/log/mongodb/mongodb.log"]
@@ -88,8 +115,96 @@ receivers:
       - type: add
         field: attributes.source
         value: mongodb
+      - type: add
+        field: attributes.service.name
+        value: mongodb-service
 
+  prometheus/mosquitto:
+    config:
+      scrape_configs:
+        - job_name: 'mosquitto-http'
+          scrape_interval: 5s
+          static_configs:
+            - targets: ['mosquitto-exporter:9234']
 
+  filelog/mosquitto:
+    include: ["/mosquitto/log/mosquitto.log"]
+    operators:
+      # Regex para o formato padrão do Mosquitto: 1625156400: mosquitto version 2.0.11 starting
+      - type: regex_parser
+        regex: '^(?P<timestamp>\d+): (?P<msg>.*)$'
+        timestamp:
+          parse_from: attributes.timestamp
+          layout: '%s' # Parse de Unix timestamp
+      - type: move
+        from: attributes.msg
+        to: body
+      - type: add
+        field: attributes.source
+        value: mosquitto
+      - type: add
+        field: attributes.service.name
+        value: mosquitto-service
+
+  prometheus/orion:
+    config:
+      scrape_configs:
+        - job_name: 'orion'
+          scrape_interval: 5s
+          metrics_path: /probe
+          static_configs:
+            - targets: ['orion-exporter:8080']
+          relabel_configs:
+            # Pega o endereço original e coloca no parâmetro 'target' da URL
+            - source_labels: [__address__]
+              target_label: __param_target
+            # Define o label 'instance' com o valor do target para facilitar a busca no SigNoz
+            - source_labels: [__param_target]
+              target_label: instance
+            # Redireciona a requisição de scrape para o container do orion-exporter
+            - target_label: __address__
+              replacement: "orion-exporter:8080"
+
+  filelog/orion:
+    include: ["/var/log/orion/orion.log"]
+    # Garante que ele leia do início se o arquivo for novo
+    start_at: beginning
+    operators:
+      # 1. Divide a linha bruta em campos usando o separador " | "
+      - type: regex_parser
+        regex: '^(?P<time>[^|]+) \| (?P<content>.*)$'
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%d %H:%M:%S'
+      # 2. Processa o restante da linha como pares Key-Value
+      - type: key_value_parser
+        parse_from: attributes.content
+        delimiter: " | " # Separador entre os pares
+        pair_delimiter: "=" # Separador entre chave e valor
+      # 3. Mapeia a severidade (lvl) para o padrão OTel
+      - type: severity_parser
+        parse_from: attributes.lvl
+        mapping:
+          info: INFO
+          warn: WARN
+          error: ERROR
+          fatal: FATAL
+          debug: DEBUG
+          # Para o nível customizado do Orion, mapeamos para INFO no SigNoz
+          # para que não se perca, mas sem duplicar a chave 'info'
+          summary: INFO
+      # 4. Limpeza e Organização
+      - type: move
+        from: attributes.msg
+        to: body
+      - type: remove
+        field: attributes.content
+      - type: remove
+        field: attributes.time
+      - type: add
+        field: attributes.service.name
+        value: orion-context-broker
+      
 processors:
   batch:
     send_batch_size: 10000
@@ -172,18 +287,17 @@ exporters:
     tls:
       insecure: true
 
-
-
 service:
   telemetry:
     logs:
       # level: debug
       encoding: json
+
   extensions:
     - health_check
     - pprof
-  pipelines:
 
+  pipelines:
     metrics/mongodb:
       receivers: [mongodb]
       processors: [resourcedetection, batch]
@@ -208,3 +322,29 @@ service:
       receivers: [signozmeter]
       processors: [batch/meter]
       exporters: [signozclickhousemeter]
+    metrics/mosquitto:
+      receivers: [prometheus/mosquitto]
+      processors: [resourcedetection, batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+    logs/mosquitto:
+      receivers: [filelog/mosquitto]
+      processors: [batch]
+      exporters: [clickhouselogsexporter]
+    metrics/orion:
+      receivers: [prometheus/orion]
+      processors: [resourcedetection, batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+    logs/orion:
+      receivers: [filelog/orion]
+      processors: [batch]
+      exporters: [clickhouselogsexporter]
+    metrics/hostmetrics:
+      receivers: [hostmetrics]
+      processors: [resourcedetection, batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+    metrics/nvidia:
+      receivers: [prometheus/nvidia]
+      processors: [batch]
+      exporters: [signozclickhousemetrics, metadataexporter, signozmeter]
+
+    

@@ -1,0 +1,1 @@
+docker run -it --rm -e SCENARIO=stress -e MQTT_HOST=mosquitto --network fiware-backend -e NUM_WATER=100 -e NUM_RAIN=50 -v $(pwd):/scripts k6-mqtt run --vus 200 --duration 5m /scripts/rain_monitoring_load_test.js

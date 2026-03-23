@@ -9,6 +9,8 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=admin
       - MONGO_INITDB_ROOT_PASSWORD=admin123
     command: ["mongod", "--nojournal", "--auth"]
+    networks:
+      - backend
     ports:
       - "27017:27017"  # <-- Exposto externamente, se necessário
     volumes:
@@ -23,6 +25,8 @@ services:
     command: ["mongod", "--nojournal", "--logpath", "/var/log/mongodb/mongodb.log"]
     networks:
       - backend
+    ports:
+      - "27018:27017"  # <-- Exposto externamente, se necessário
     # Nenhuma porta mapeada para o host
     volumes:
       - mongo-internal-data:/data/db
@@ -36,8 +40,12 @@ services:
     hostname: orion
     depends_on:
       - mongo-db-historical
+    networks:
+      - backend
     ports:
       - "1026:1026"
+    volumes:
+      - orion-logs:/var/log/orion
     command: >
       -dbhost mongo-db-historical
       -dbuser admin
@@ -45,16 +53,23 @@ services:
       -dbAuthDb admin
       -corsOrigin __ALL
       -corsMaxAge 600
+      -logDir /var/log/orion
+      -logLevel INFO
 
   orion-exporter:
     image: fiware/service.orionexporter
     restart: no
     container_name: fiware-orion-exporter
-    depends_on: 
+    depends_on:
       - orion
+    networks:
+      - backend
     ports:
-      - "1027:"
-    command: ["--config"]
+      - "1027:8080"
+    command: ["--config", "/etc/orion-exporter/config.json"]
+    configs:
+      - source: orion_exporter_config
+        target: /etc/orion-exporter/config.json
 
   # STH Comet – Armazena dados históricos (usando mongo-db-historical, com auth)
   fiware-sth-comet:
@@ -64,6 +79,8 @@ services:
     hostname: sth-comet
     depends_on:
       - mongo-db-historical
+    networks:
+      - backend
     ports:
       - "8666:8666"
     environment:
@@ -82,19 +99,38 @@ services:
     restart: no
     container_name: fiware-mosquitto
     hostname: mosquitto
+    networks:
+      - backend
     ports:
       - "1883:1883"
       - "9001:9001"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto-logs:/mosquitto/log
 
   mosquitto-exporter:
     image: sapcc/mosquitto-exporter
     restart: no
     container_name: fiware-mosquitto-exporter
-    ports: 
+    networks:
+      - backend
+    ports:
       - "9234:9234"
     command: ["--endpoint", "tcp://mosquitto:1883"]
+
+  mosquitto-ui:
+    image: terdia07/mqttui:v1.3.2
+    restart: no
+    container_name: fiware-mosquitto-ui
+    depends_on:
+      - mosquitto
+    networks:
+      - backend
+    ports:
+      - "8088:5000"
+    environment:
+      - DEBUG=False
+      - MQTT_BROKER=mosquitto
 
   # IoT Agent – UL (usando mongo-db-internal, sem auth)
   iot-agent:
@@ -107,6 +143,8 @@ services:
       - mosquitto
     expose:
       - "4041"
+    networks:
+      - backend
     ports:
       - "4041:4041"
     environment:
@@ -140,3 +178,16 @@ volumes:
   mongo-historical-data:
   mongo-logs:
   mongo-internal-data:
+  mosquitto-logs:
+  orion-logs:
+
+configs:
+  orion_exporter_config:
+    content: |
+      {
+        "endpoints": [
+          {
+            "target": "http://orion:1026"
+          }
+        ]
+      }

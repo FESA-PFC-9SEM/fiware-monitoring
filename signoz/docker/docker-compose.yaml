@@ -145,6 +145,9 @@ services:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
       - ../common/signoz/otel-collector-opamp-config.yaml:/etc/manager-config.yaml
       - mongo-logs:/var/log/mongodb
+      - mostquitto-logs:/mosquitto/log
+      - orion-logs:/var/log/orion
+      - /:/hostfs:ro
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=host.name=signoz-host,os.type=linux
       - LOW_CARDINAL_EXCEPTION_GROUPING=false
@@ -174,6 +177,20 @@ services:
         /signoz-otel-collector migrate sync up &&
         /signoz-otel-collector migrate async up
 
+  dcgm-exporter:
+    !!merge <<: *common
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.4.2-4.7.1-ubuntu22.04
+    container_name: signoz-dcgm-exporter
+    ports:
+      - "9400:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    cap_add:
+      - SYS_ADMIN
+
 networks:
   signoz-net:
     name: signoz-net
@@ -193,4 +210,10 @@ volumes:
     external: true
   mongo-logs:
     name: fiware_mongo-logs
+    external: true
+  mostquitto-logs:
+    name: fiware_mosquitto-logs
+    external: true
+  orion-logs:
+    name: fiware_orion-logs
     external: true
